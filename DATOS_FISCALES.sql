@@ -1,0 +1,141 @@
+-- =============================================
+--  DDL Clientes Datos Fiscales (Fiscal) y Bitácora de Auditoría
+-- =============================================
+
+BEGIN
+   EXECUTE IMMEDIATE 'DROP TABLE DATOS_FISCALES_BIT CASCADE CONSTRAINTS';
+EXCEPTION WHEN OTHERS THEN NULL;
+END;
+/
+
+BEGIN
+   EXECUTE IMMEDIATE 'DROP SEQUENCE SEQ_DATOSFIC_ID';
+EXCEPTION WHEN OTHERS THEN NULL;
+END;
+/
+
+BEGIN
+   EXECUTE IMMEDIATE 'DROP TABLE DATOS_FISCALES CASCADE CONSTRAINTS';
+EXCEPTION WHEN OTHERS THEN NULL;
+END;
+/
+
+CREATE TABLE DATOS_FISCALES (
+    ID_DATOSFIC     VARCHAR2(36) NOT NULL,
+    ID_CLIENTE      VARCHAR2(36) NOT NULL,
+    RAZON_SOCIAL    VARCHAR2(150) NOT NULL, -- Nombre oficial ante el SAT
+    RFC             VARCHAR2(13) NOT NULL,  -- 12 para Personas Morales, 13 para Físicas
+    CODIGO_POSTAL   VARCHAR2(5) NOT NULL,
+    ID_TIPO_CLIENTE  VARCHAR2(3) NOT NULL,  -- Clave del catálogo SAT (ej. 601, 625)
+    USO_CFDI        VARCHAR2(3) NOT NULL,  -- Clave de uso (ej. G03, P01)
+    EMAIL           VARCHAR2(100),
+    D_ESTADO       VARCHAR2(36)  NOT NULL,
+    D_CUIDAD     VARCHAR2(36)  NOT NULL,
+    D_COLONIA     VARCHAR2(36)  NOT NULL,
+    D_ZONA       VARCHAR2(36)  NOT NULL,
+    CREATED_AT      DATE DEFAULT SYSDATE,
+    STATUS          NUMBER(2) NOT NULL,    -- 0: Activo, 99: Inactivo
+    CONSTRAINT pk_id_datosFiscales_clientes PRIMARY KEY (ID_DATOSFIC),
+    CONSTRAINT uk_rfc_cliente UNIQUE (RFC),
+    CONSTRAINT fk_tipo_cliente FOREIGN KEY (ID_TIPO_CLIENTE) REFERENCES CAT_TIPO_CLIENTE (ID_TIPO_CLIENTE),
+    CONSTRAINT fk_email_cliente FOREIGN KEY (ID_CLIENTE) REFERENCES CLIENTES (ID_CLIENTE)
+);
+
+COMMENT ON TABLE DATOS_FISCALES IS 'Almacena la información fiscal de los clientes para facturación CFDI 4.0';
+COMMENT ON COLUMN DATOS_FISCALES.ID_CLIENTE IS 'Identificador único interno (CLI-XXXXXX)';
+COMMENT ON COLUMN DATOS_FISCALES.RAZON_SOCIAL IS 'Nombre o Denominación Social EXACTA como en la Constancia de Situación Fiscal';
+COMMENT ON COLUMN DATOS_FISCALES.RFC IS 'Registro Federal de Contribuyentes';
+COMMENT ON COLUMN DATOS_FISCALES.CODIGO_POSTAL IS 'Domicilio fiscal del receptor (5 dígitos)';
+COMMENT ON COLUMN DATOS_FISCALES.ID_TIPO_CLIENTE IS 'Clave del régimen tributario del cliente';
+COMMENT ON COLUMN DATOS_FISCALES.STATUS IS 'Bandera para borrado lógico (1=Activo, 0=Inactivo)';
+
+-- 3. Secuencia y Trigger para ID Autogenerado
+CREATE SEQUENCE SEQ_DATOSFIC_ID START WITH 1 INCREMENT BY 1 MINVALUE 1 NOCACHE NOCYCLE;
+
+CREATE OR REPLACE TRIGGER TRG_DATOS_FISCALES_ID
+BEFORE INSERT ON DATOS_FISCALES
+FOR EACH ROW
+BEGIN
+    IF :NEW.ID_DATOSFIC IS NULL THEN
+       :NEW.ID_DATOSFIC := 'DATFIC-' || LPAD(SEQ_DATOSFIC_ID.NEXTVAL, 6, '0');
+    END IF;
+END;
+/
+
+-- 4. Creación de Tabla de Bitácora (Auditoría)
+CREATE TABLE DATOS_FISCALES_BIT (
+    ID_BITACORA     VARCHAR2(36) NOT NULL,
+    ID_DATOSFIC      VARCHAR2(36) NOT NULL,
+    ID_CLIENTE      VARCHAR2(36),
+    ID_TIPO_CLIENTE    VARCHAR2(150),
+    RFC             VARCHAR2(13),
+    CODIGO_POSTAL   VARCHAR2(5) NOT NULL,
+    D_ESTADO       VARCHAR2(36)  NOT NULL,
+    D_CUIDAD     VARCHAR2(36)  NOT NULL,
+    D_COLONIA     VARCHAR2(36)  NOT NULL,
+    D_ZONA       VARCHAR2(36)  NOT NULL,
+    STATUS          NUMBER(2),
+    ACTION_DATE     DATE DEFAULT SYSDATE,
+    ACTION_TYPE     VARCHAR2(20) NOT NULL, -- INSERT, UPDATE, DEACTIVATE
+    USER_IP         VARCHAR2(30),
+
+    CONSTRAINT pk_datosfiscales_bit PRIMARY KEY (ID_BITACORA)
+);
+
+COMMENT ON TABLE DATOS_FISCALES_BIT IS 'Histórico de movimientos y cambios en los datos fiscales de clientes';
+
+-- 5. Trigger de Auditoría
+CREATE OR REPLACE TRIGGER TRG_DATOS_FISCALES_AUD
+AFTER INSERT OR UPDATE ON DATOS_FISCALES
+FOR EACH ROW
+DECLARE
+    V_ACTION VARCHAR2(20);
+BEGIN
+    -- Determinar el tipo de operación
+    IF INSERTING THEN
+        V_ACTION := 'INSERT';
+    ELSIF UPDATING THEN
+        IF :OLD.STATUS = 1 AND :NEW.STATUS = 0 THEN
+            V_ACTION := 'DEACTIVATE';
+        ELSIF :OLD.STATUS = 0 AND :NEW.STATUS = 1 THEN
+            V_ACTION := 'ACTIVATE';
+        ELSE
+            V_ACTION := 'UPDATE';
+        END IF;
+    END IF;
+
+    -- Insertar en bitácora
+    INSERT INTO DATOS_FISCALES_BIT (
+        ID_BITACORA,
+        ID_DATOSFIC,
+        ID_CLIENTE,
+        ID_TIPO_CLIENTE,
+        RFC,
+        CODIGO_POSTAL,
+        D_ESTADO,
+        D_CUIDAD,
+        D_COLONIA,
+        D_ZONA,
+        STATUS,
+        ACTION_DATE,
+        ACTION_TYPE,
+        USER_IP
+    )
+    VALUES (
+        SYS_GUID(),
+        :NEW.ID_DATOSFIC,
+        :NEW.ID_CLIENTE,
+        :NEW.ID_TIPO_CLIENTE,
+        :NEW.RFC,
+        :NEW.CODIGO_POSTAL,
+        :NEW.D_ESTADO,
+        :NEW.D_CUIDAD,
+        :NEW.D_COLONIA,
+        :NEW.D_ZONA,
+        :NEW.STATUS,
+        SYSDATE,
+        V_ACTION,
+        FN_GET_IP
+    );
+END;
+/
